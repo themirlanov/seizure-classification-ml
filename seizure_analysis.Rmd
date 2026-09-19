@@ -1,0 +1,508 @@
+---
+title: "Final Project: Part 2: Seizure Predicitng Analysis"
+author: "Erzhan Mirlanov"
+date: "`r Sys.Date()`"
+output: openintro::lab_report
+---
+First, the seizure dataset was loaded into R. The variables X and type were removed because they were not needed for the analysis. Type will be used later on the second part of analysis. The seizure variable was converted into a factor so it can be used for classification models. The data was split into training and testing sets. About 70% of the data was used for training and 30% was used for testing. The testing data was not used during training, so it can give a fair evaluation of model performance on new data
+
+```{r load-packages, message=FALSE}
+library(tidyverse)
+library(openintro)
+library(caret)
+library(class)
+library(boot)
+original_seizure <- read.csv("seizure.csv") 
+seizure <- original_seizure |>
+  select(-X, -type)
+seizure$seizure <- factor(seizure$seizure)
+set.seed(1)
+train <- sample(8000, 5600)
+```
+
+
+### Logistic Regression
+
+Why it was performed:
+Logistic regression was used as the first supervised learning model. It is a common method for binary classification problems and can predict if an observation belongs to the seizure or non-seizure class. This model was used as a baseline to compare with more advanced models later
+
+```{r}
+seizure_train <- slice(seizure,train) 
+seizure_test <- slice(seizure, -train)
+seizure_train_label <- seizure_train$seizure
+seizure_test_label <- seizure_test$seizure
+
+log.reg <- glm(seizure ~ .,
+             data = seizure_train,
+             family = binomial)
+prob <- predict(log.reg, newdata = seizure_test, type = "response")
+pred_class <- ifelse(prob > 0.5, 1, 0)
+
+```
+
+Results of Logistic Regression:
+The logistic regression model achieved 81.0% accuracy on the test data. This result is better than random guessing, but the model had difficulty identifying some non-seizure observations. The balanced accuracy was only 61.7%, which shows that the model performance was not equally good for both classes. Overall, the model worked reasonably well but there was room for improvement
+
+```{r}
+confusionMatrix(
+  factor(pred_class),
+  factor(seizure_test_label)
+)
+
+```
+
+
+
+### K Means Clustering
+
+Why it was performed:
+K-means clustering was used to see if the observations naturally form groups. This is an unsupervised learning method, so it does not use the seizure labels during training. The goal was to find hidden patterns in the data
+
+```{r}
+seizure_train <- slice(seizure,train) 
+seizure_test <- slice(seizure, -train)
+
+seizure_scaled <- scale(
+  seizure_train |> select(-seizure)
+)
+
+km.seizure <- kmeans(
+  seizure_scaled,
+  centers = 2,
+  nstart = 20
+)
+centers <- km.seizure$centers
+
+table(
+  Cluster = km.seizure$cluster,
+  Seizure = seizure_train$seizure
+)
+```
+
+Results of clustering:
+The clustering algorithm created two clusters. One cluster contained mostly seizure observations and the other cluster contained non-seizure observations. The clustering accuracy was about 83.9%. This suggests that the seizure and non-seizure groups are already separated to some degree in the data
+
+```{r}
+cluster_pred <- ifelse(km.seizure$cluster == 1, "1", "0")
+acc1 <- mean(cluster_pred == seizure_train$seizure)
+
+cluster_pred <- ifelse(km.seizure$cluster == 1, "0", "1")
+acc2 <- mean(cluster_pred == seizure_train$seizure)
+
+max(acc1, acc2)
+```
+
+New variables from clistering:
+After clustering, the distance from each observation to both cluster centers was calculated. These distance values were added as new variables. The idea was that these new features may help supervised models better understand the structure of the dat
+
+```{r}
+dist1 <- apply(seizure_scaled, 1, function(x) sqrt(sum((x - centers[1,])^2)))
+dist2 <- apply(seizure_scaled, 1, function(x) sqrt(sum((x - centers[2,])^2)))
+
+seizure_train$dist_cluster1 <- dist1
+seizure_train$dist_cluster2 <- dist2
+```
+
+
+### Logistic Regression with K-Means Features
+
+The new cluster distance variables were added to logistic regression. This was done to see if the information learned from clustering could improve prediction accuracy
+After adding the cluster distance variables, the model performance improved a lot. The accuracy increased from 81.0% to 97.25%. The balanced accuracy also increased to 95.86%. This shows that the cluster information helped the model better separate seizure and non-seizure observations
+
+```{r}
+log.reg <- glm(seizure ~ .,
+             data = seizure_train,
+             family = binomial)
+
+
+test_scaled <- scale(
+  seizure_test |> select(-seizure),
+  center = attr(seizure_scaled, "scaled:center"),
+  scale = attr(seizure_scaled, "scaled:scale")
+)
+
+seizure_test$dist_cluster1 <- apply(
+  test_scaled,
+  1,
+  function(x) sqrt(sum((x - centers[1,])^2))
+)
+
+seizure_test$dist_cluster2 <- apply(
+  test_scaled,
+  1,
+  function(x) sqrt(sum((x - centers[2,])^2))
+)
+
+prob <- predict(
+  log.reg,
+  newdata = seizure_test,
+  type = "response"
+)
+
+pred_class <- factor(
+  ifelse(prob > 0.5, 1, 0),
+  levels = levels(seizure_test$seizure)
+)
+
+confusionMatrix(
+  pred_class,
+  seizure_test$seizure
+)
+```
+
+
+### Random Forest
+
+Why it was performed:
+Random Forest was used because it is one of the most powerful machine learning algorithms for classification. It can find complex relationships between variables and usually performs very well on structured data
+
+Why it was performed:
+Random Forest was used because it is one of the most powerful machine learning algorithms for classification. It can find complex relationships between variables and usually performs very well on structured data
+
+Why parallel processing was used:
+Training many Random Forest models can take a long time. Parallel processing was used so multiple models could run at the same time on different CPU cores. This reduced the total computation time.
+
+Results:
+Several mtry values were tested. The best result was obtained with mtry = 2, which achieved about 99.71% accuracy during tuning. The results show that Random Forest performed very well for this dataset.
+
+```{r}
+library(randomForest)
+library(caret)
+library(doParallel)
+seizure_train <- slice(seizure,train) 
+seizure_test <- slice(seizure, -train)
+seizure_train_label <- seizure_train$seizure
+seizure_test_label <- seizure_test$seizure
+
+ptm <- proc.time()
+
+n_core <- detectCores() - 1
+clust <- makePSOCKcluster(n_core)
+
+registerDoParallel(clust)
+
+mtry_values <- c(2, 4, 6, 8, 10, 12, 14, 16)
+
+results <- foreach(
+  m = mtry_values,
+  .combine = rbind,
+  .packages = c("randomForest", "caret")
+) %dopar% {
+
+  set.seed(1)
+
+  rf.fit <- randomForest(
+    seizure ~ .,
+    data = seizure_train,
+    ntree = 500,
+    mtry = m
+  )
+
+  pred <- predict(
+    rf.fit,
+    newdata = seizure_test
+  )
+
+  cm <- confusionMatrix(
+    pred,
+    seizure_test$seizure
+  )
+
+  data.frame(
+    mtry = m,
+    Accuracy = cm$overall["Accuracy"],
+    Kappa = cm$overall["Kappa"]
+  )
+}
+
+stopCluster(clust)
+
+results
+
+proc.time() - ptm
+
+results[which.max(results$Accuracy), ]
+```
+
+During hyperparameter tuning, the highest accuracy was achieved with mtry = 2. However, the performance differences between the tested mtry values were very small. For example, mtry values between 2 and 10 all produced accuracies above 99.6%. Because the differences were minimal, mtry = 10 was selected for the final model since it allows more predictor variables to be considered at each split while maintaining nearly identical predictive performance. The final model achieved 99.54% accuracy on the test set
+
+```{r}
+rf.final <- randomForest(
+  seizure ~ .,
+  data = seizure_train,
+  ntree = 500,
+  mtry = 10,
+  importance = TRUE
+)
+```
+
+```{r}
+seizure_rf_prob<- predict(rf.final, newdata = seizure_test, type = "response")
+seizure_rf_pred <- predict(
+    rf.final,
+    newdata = seizure_test,
+    type = "response"
+)
+
+confusionMatrix(
+    seizure_rf_pred,
+    seizure_test_label
+)
+```
+
+The variable importance results showed that X16 was the most important predictor. Other important variables included X15, X6, X10, and X2. This means these variables contain a lot of useful information for predicting seizures
+
+```{r}
+importance(rf.final)
+```
+
+```{r}
+varImpPlot(rf.final)
+```
+
+
+### KNN Classification
+
+K-nearest neighbors (KNN) was also tested because it is a simple but powerful classification algorithm. KNN makes predictions based on observations that are most similar to each other. Since KNN uses distance calculations, the variables were standardized before training
+
+Why tuning was performed:
+KNN has a tuning parameter called k, which is the number of neighbors used for prediction. Different values of k can change the model performance, so tuning was needed to find the best value.
+
+Why cross validation was used:
+Ten-fold cross validation was used to evaluate different k values. This method gives a more reliable estimate of performance and helps reduce overfitting.
+
+Why parallel processing was used:
+Many KNN models had to be trained during tuning. Parallel processing allowed multiple models to run at the same time, which saved computation time.
+
+Results:
+Values from k = 1 to k = 31 were tested. The highest cross-validation accuracy was achieved with k = 1. As k became larger, the accuracy slowly decreased. This means the nearest observations contain very useful information for classification in this dataset.
+
+```{r}
+
+ptm <- proc.time()
+
+n_core <- detectCores() - 1
+clust <- makePSOCKcluster(n_core)
+
+registerDoParallel(clust)
+
+seizure_train <- slice(seizure, train)
+seizure_test <- slice(seizure, -train)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  allowParallel = TRUE
+)
+
+set.seed(1)
+
+knn.seizure <- train(
+  seizure ~ .,
+  data = seizure_train,
+  method = "knn",
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = 1:31),
+  trControl = ctrl
+)
+
+stopCluster(clust)
+
+(timer2 <- proc.time() - ptm)
+
+knn.seizure
+
+
+```
+```{r}
+plot(knn.seizure)
+```
+
+Cross-validation identified k = 1 as the value with the highest accuracy. However, k = 1 can be sensitive to noise and unusual observations because predictions depend on a single nearest neighbor. To improve model stability and reduce the risk of overfitting, k = 5 was selected for the final model. Although the accuracy decreased slightly, the model still achieved 99.54% accuracy on the test set, indicating that performance remained extremely strong while providing more robust predictions
+
+```{r}
+seizure_knn_pred <- knn(train =  seizure_train,
+                 test = seizure_test,
+                 cl = seizure_train_label,
+                 k = 5)
+
+confusionMatrix(
+  factor(seizure_knn_pred),
+  factor(seizure_test$seizure)
+)
+```
+
+### Model Selection
+
+All models performed differently. K-means clustering achieved 83.88% accuracy and was mainly useful for creating new features. Logistic regression improved from 81.0% to 97.25% after adding cluster distance features. Random Forest achieved 99.62% accuracy, while KNN achieved the highest accuracy at 99.67%.
+
+Even though KNN had slightly higher accuracy, I would choose Random Forest as the final model. The difference in performance is very small, but Random Forest gives information about variable importance and is usually more stable. It is also less sensitive to unusual observations than KNN with k = 1. Because of this, Random Forest is the best overall model for this dataset
+
+
+### Further Analysis for predicitng type
+
+```{r}
+set.seed(1)
+multi <- original_seizure |>
+  select(-X, -seizure)
+
+multi$type <- factor(multi$type)
+train <- sample(8000, 5600)
+
+```
+
+### Random Forest
+
+Random Forest was used to classify the four seizure types. Before building the final model, different values of mtry were tested. The mtry parameter controls how many predictors are checked at each split in a tree. Parallel processing was used to make the tuning process faster because many models had to be trained
+
+The best accuracy was found when mtry = 2, which gave about 97.2% accuracy. As mtry became larger, the accuracy slowly became lower. This happen because larger mtry values make the trees more similar to each other. Random Forest works best when trees are different, so having less diversity can reduce performance a little bit
+
+```{r}
+multi_train <- slice(multi, train)
+multi_test <- slice(multi, -train)
+multi_train_label <- multi_train$type
+multi_test_label <- multi_test$type
+
+library(randomForest)
+library(doParallel)
+library(foreach)
+library(caret)
+
+ptm <- proc.time()
+
+n_core <- detectCores() - 1
+clust <- makePSOCKcluster(n_core)
+
+registerDoParallel(clust)
+
+mtry_values <- c(2,4,6,8,10,12,14,16)
+
+rf_results <- foreach(
+  m = mtry_values,
+  .combine = rbind,
+  .packages = c("randomForest","caret")
+) %dopar% {
+
+  set.seed(1)
+
+  rf.fit <- randomForest(
+    type ~ .,
+    data = multi_train,
+    ntree = 500,
+    mtry = m
+  )
+
+  pred <- predict(
+    rf.fit,
+    newdata = multi_test
+  )
+
+  cm <- confusionMatrix(
+    pred,
+    multi_test_label
+  )
+
+  data.frame(
+    mtry = m,
+    Accuracy = cm$overall["Accuracy"],
+    Kappa = cm$overall["Kappa"]
+  )
+}
+
+stopCluster(clust)
+
+rf_results
+```
+Even though mtry = 2 gave the highest accuracy, the final model used mtry = 5. The difference in accuracy was very small, less than one percent. Using mtry = 5 allows each tree to look at more predictors while still keeping good diversity between trees. Because the performance difference was small, mtry = 5 was chosen for the final model
+
+The final Random Forest model used 500 trees and mtry = 5. The model achieved an accuracy of 96.9% and a Kappa value of 0.958. The model classified all four seizure types very well. The healthy subject class had almost perfect performance, while the other classes also showed high sensitivity and specificity. Overall, Random Forest performed very strong on this dataset
+
+```{r}
+rf.final <- randomForest(
+  type ~ .,
+  data = multi_train,
+  ntree = 500,
+  mtry = 5,
+  importance = TRUE
+)
+
+rf.pred <- predict(
+  rf.final,
+  newdata = multi_test
+)
+
+confusionMatrix(
+  rf.pred,
+  multi_test_label
+)
+```
+
+### KNN
+
+KNN was also used to classify seizure type. Because KNN is based on distance, all predictor variables were centered and scaled before training. Ten-fold cross validation was used to test values of k from 1 to 31. Parallel processing was used to reduce computation time
+
+```{r}
+
+multi_train <- slice(multi, train)
+multi_test <- slice(multi, -train)
+multi_train_label <- multi_train$type
+multi_test_label <- multi_test$type
+
+
+n_core <- detectCores() - 1
+clust <- makePSOCKcluster(n_core)
+
+registerDoParallel(clust)
+
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  allowParallel = TRUE
+)
+
+set.seed(1)
+
+knn.type <- train(
+  type ~ .,
+  data = multi_train,
+  method = "knn",
+  preProcess = c("center","scale"),
+  tuneGrid = expand.grid(k = 1:31),
+  trControl = ctrl
+)
+
+stopCluster(clust)
+
+knn.type
+```
+
+The highest cross-validation accuracy was obtained when k = 1. As k became larger, the accuracy slowly decreased. This happen because larger values of k use more neighbors when making predictions. Using too many neighbors can smooth the decision boundary and make different classes look more similar. Since the seizure types are already separated quite well, smaller values of k worked better
+
+```{r}
+plot(knn.type)
+```
+
+Even though k = 1 had the highest accuracy during tuning, the final model used k = 5. A model with k = 1 can be very sensitive to noise because predictions depend on only one neighbor. Using k = 5 makes predictions more stable because several nearby observations are used. The small loss in accuracy was acceptable because the model may generalize better to new data
+
+The final KNN model achieved an accuracy of 94.6% and a Kappa value of 0.928. The model performed very well for healthy subject and seizure event observations. However, it made more mistakes between focal and generalized seizures compared to Random Forest. Overall, KNN showed strong performance but was not as accurate as Random Forest
+
+```{r}
+type_knn_pred <- knn(
+  train = select(multi_train, -type),
+  test = select(multi_test, -type),
+  cl = multi_train$type,
+  k = 5
+)
+
+confusionMatrix(
+  type_knn_pred,
+  multi_test_label
+)
+
+```
+
+### Model Selection for predicitng type of seizure
+
+Random Forest would be chosen as the final model for predicting seizure type. It achieved the highest accuracy and Kappa value on the test dataset. It also performed better across all four classes and made fewer classification errors. KNN also worked very well, but Random Forest gave more accurate and more consistent results. Because of this, Random Forest is the model we would choose for future seizure type predictions
+
+
